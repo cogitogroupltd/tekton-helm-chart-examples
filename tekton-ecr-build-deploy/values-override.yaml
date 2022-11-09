@@ -1,0 +1,294 @@
+secret_ssh_key:
+secret_ssh_cred: ssh-key
+secret_docker_conf: docker-config
+docker_config_json: 
+configmap_kube_conf: kube-config
+secret_slack_webhook_uri: 
+github_token:
+
+# Define variables used for both ecr-build-push and imagePullSecret in helm-deploy
+# AWS_ECR_ACCOUNT_ID: &AWS_ECR_ACCOUNT_ID "00__EXAMPLE__091"
+# AWS_ACCESS_KEY_ID: &AWS_ACCESS_KEY_ID "AKIAQEEX__EXAMPLE__RNSP5K"
+# AWS_SECRET_ACCESS_KEY: &AWS_SECRET_ACCESS_KEY "E+fkkgIuTS1H__EXAMPLE__+2bgoWP+K"
+AWS_ECR_ACCOUNT_ID: &AWS_ECR_ACCOUNT_ID "009453609091"
+AWS_ACCESS_KEY_ID: &AWS_ACCESS_KEY_ID "AKIAQEEX__EXAMPLE__RNSP5K"
+AWS_SECRET_ACCESS_KEY: &AWS_SECRET_ACCESS_KEY "E+fkkgIuTS1H__EXAMPLE__+2bgoWP+K"
+
+taskdefinitions:
+  enabled: true
+  serviceAccounts:
+  - name: ecr-build-push
+    yaml: |-
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: ecr-build-push
+        namespace: tekton-pipelines
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: "cluster-administrator-ecr-build"
+      subjects:
+        - kind: ServiceAccount
+          name: "ecr-build-push"
+          namespace: tekton-pipelines
+      roleRef:
+        kind: ClusterRole
+        name: cluster-admin
+        apiGroup: rbac.authorization.k8s.io
+  - name: helm-deploy
+    yaml: |-
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: helm-deploy
+        namespace: tekton-pipelines
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: "cluster-administrator-helm-deploy"
+      subjects:
+        - kind: ServiceAccount
+          name: "helm-deploy"
+          namespace: tekton-pipelines
+      roleRef:
+        kind: ClusterRole
+        name: cluster-admin
+        apiGroup: rbac.authorization.k8s.io
+  tasks:
+  - name: ecr-build-push
+    clusterAdmin: false
+    description: >-
+      This task does a AWS CLI command to login to ECR, builds the docker image and pushes it to ECR
+    podTemplate:
+      tolerations:
+        - key: "name"
+          operator: "Equal"
+          value: "infra"
+          effect: "NoSchedule"
+    volumes:
+    - name: docker
+      hostPath:
+        path: /var/run/docker.sock
+    workspaces:
+    - name: git-pvc
+      description: "git source volume"
+    runAfter:
+    - git-clone
+    params:
+    - name: app_short_name
+      type: string
+    - name: location
+      type: string
+      default: "."
+    - name: AWS_ECR_REPOSITORY
+      type: string
+      default: ""
+    - name: AWS_ECR_ACCOUNT_ID
+      type: string
+      default: ""
+    - name: AWS_ACCESS_KEY_ID
+      type: string
+      default: ""
+    - name: AWS_SECRET_ACCESS_KEY
+      type: string
+      default: ""
+    - name: AWS_REGION
+      type: string
+      default: "eu-west-1"
+    - name: docker_tag_version
+      type: string
+      default: "master"
+    - name: stage
+      type: string
+      default: "defaultstage"
+    - name: arch
+      type: string
+      default: "arm64"
+    steps:
+    - name: ecr-build-push
+      image: george7522/cicd-agent:0.01
+      workingDir: $(workspaces.git-pvc.path)
+      volumeMounts:
+      - name: docker
+        mountPath: /var/run/docker.sock
+      env:
+      - name: location
+        value: $(params.location)
+      - name: AWS_ACCESS_KEY_ID
+        value: $(params.AWS_ACCESS_KEY_ID)
+      - name: AWS_SECRET_ACCESS_KEY
+        value: $(params.AWS_SECRET_ACCESS_KEY)
+      script: |
+        set -x 
+        set -e
+        # Build image
+        aws ecr get-login-password --region $(params.AWS_REGION) | docker login --username AWS --password-stdin "$(params.AWS_ECR_ACCOUNT_ID).dkr.ecr.$(params.AWS_REGION).amazonaws.com"
+        docker build --network=host -t "$(params.AWS_ECR_ACCOUNT_ID).dkr.ecr.$(params.AWS_REGION).amazonaws.com/$(params.AWS_ECR_REPOSITORY):$(params.docker_tag_version)" "$location" --build-arg NPM_TOKEN="${NPM_TOKEN}"
+        docker push "$(params.AWS_ECR_ACCOUNT_ID).dkr.ecr.$(params.AWS_REGION).amazonaws.com/$(params.AWS_ECR_REPOSITORY):$(params.docker_tag_version)"  
+  - name: helm-deploy
+    clusterAdmin: false  
+    description: >-
+      This task does a helm deployment to EKS
+    workspaces:
+    - name: git-pvc
+      description: "git source volume"
+    runAfter:
+    - git-clone-infra
+    params:
+    - name: AWS_ECR_ACCOUNT_ID
+      type: string
+      default: ""
+    - name: AWS_ACCESS_KEY_ID
+      type: string
+      default: ""
+    - name: AWS_SECRET_ACCESS_KEY
+      type: string
+      default: ""
+    - name: AWS_REGION
+      type: string
+      default: "eu-west-1"
+    - name: app_short_name
+      type: string
+    - name: docker_tag_version
+      type: string
+      default: "master"
+    - name: stage
+      type: string
+      default: "defaultstage"
+    steps:
+    - name: helm-deploy
+      image: george7522/cicd-agent:0.01
+      env:
+      - name: AWS_ACCESS_KEY_ID
+        value: $(params.AWS_ACCESS_KEY_ID)
+      - name: AWS_SECRET_ACCESS_KEY
+        value: $(params.AWS_SECRET_ACCESS_KEY)
+      - name: AWS_REGION
+        value: $(params.AWS_REGION)
+      - name: AWS_ECR_ACCOUNT_ID
+        value: $(params.AWS_ECR_ACCOUNT_ID)
+      workingDir: $(workspaces.git-pvc.path)
+      script: | 
+        set -e
+        set -x
+        export stage="$(params.stage)"
+        export app_short_name="$(params.app_short_name)"
+        export docker_tag_version="$(params.docker_tag_version)"
+        # cat ./examples/complete/charts/${app_short_name}/values-override-${stage}.yaml | envsubst > values-override.yaml
+        kubectl delete secret regcred -n "${stage}" --ignore-not-found=true ;  kubectl create secret docker-registry regcred -n "${stage}" --docker-server="$(params.AWS_ECR_ACCOUNT_ID).dkr.ecr.$(params.AWS_REGION).amazonaws.com" --docker-username=AWS --docker-password="$(aws ecr get-login-password --region $(params.AWS_REGION))" --docker-email="whats@this.for"
+        helm upgrade --install "${app_short_name}" ./helm-chart-boilerplate/charts/common --namespace "${stage}" --create-namespace --values ./values-override.yaml --set image.tag="${docker_tag_version}" --wait --timeout 100s
+        kubectl rollout restart "deploy/${app_short_name}-app" --namespace "${stage}"
+
+
+
+pipelines:
+  - name: prod
+    params:
+    - name: git_revision
+      description: The git revision
+      default: "master"
+    - name: git_revision_owner
+      description: The owner of the git revision
+      default: "git_owner_default_value"
+    - name: git_branch_name
+      description: The name of branch for the git revision
+      default: "git_branch_name_default_value"
+    - name: git_repository_name
+      description: The name of the git repository
+      default: "git_repository_name_default_value"
+    workspaces:
+      - name: git-pvc
+      - name: image-cache
+      - name: ssh-creds
+      - name: docker-creds-cm
+      - name: kubeconfig
+    trigger:
+      git_revisions: ['refs/heads/master']
+      eventTypes: ["push"]
+      token: ""
+    taskcall:
+    - name: git-clone
+      taskRef:
+        name: "git-clone"
+      params:
+      - name: url
+        value: git@github.com:cogitogroupltd/docker-nginx-hello-world
+      - name: revision #revision/commit
+        value: $(params.git_revision)
+      workspaces:
+      - name: ssh-directory
+        workspace: ssh-creds
+      - name: output
+        workspace: git-pvc
+    - name: git-clone-infra
+      taskRef:
+        name: "git-clone"
+      params:
+      - name: url
+        value: git@github.com:cogitogroupltd/helm-chart-boilerplate
+      - name: revision #revision/commit
+        value: main
+      - name: deleteExisting
+        value: false
+      - name: subdirectory
+        value: helm-chart-boilerplate
+      workspaces:
+      - name: ssh-directory
+        workspace: ssh-creds
+      - name: output
+        workspace: git-pvc
+      runAfter:
+        - ecr-build-push
+    - name: ecr-build-push
+      description: >-
+        This task does a AWS CLI command to login to ECR
+      taskRef:
+        name: ecr-build-push
+      runAfter:
+        - git-clone
+      params:
+      - name: app_short_name
+        value: "nginx"
+      - name: AWS_REGION
+        value: "eu-west-1"
+      - name: AWS_ECR_REPOSITORY
+        value: "test"
+      - name: AWS_ECR_ACCOUNT_ID
+        value: *AWS_ECR_ACCOUNT_ID
+      - name: AWS_ACCESS_KEY_ID
+        value: *AWS_ACCESS_KEY_ID
+      - name: AWS_SECRET_ACCESS_KEY
+        value: *AWS_SECRET_ACCESS_KEY
+      - name: docker_tag_version
+        value: $(params.git_revision)
+      - name: stage
+        value: "prod"
+      - name: arch
+        value: "defaultarch"
+      workspaces:
+      - name: git-pvc
+        workspace: git-pvc
+    - name: helm-deploy
+      taskRef:
+        name: helm-deploy
+      workspaces:
+      - name: git-pvc
+        workspace: "git-pvc"
+      runAfter:
+        - git-clone-infra
+      params:
+      - name: AWS_ECR_ACCOUNT_ID
+        value: *AWS_ECR_ACCOUNT_ID
+      - name: AWS_ACCESS_KEY_ID
+        value: *AWS_ACCESS_KEY_ID
+      - name: AWS_SECRET_ACCESS_KEY
+        value: *AWS_SECRET_ACCESS_KEY
+      - name: app_short_name
+        value: "nginx"
+      - name: docker_tag_version
+        value: $(params.git_revision)
+      - name: stage
+        value: "prod"
