@@ -1,5 +1,7 @@
 # Tekton Helm Chart - Working Examples 
 
+[Cogito Group's](https://cogitogroup.co.uk) cloud agnostic and generic Tekton Helm chart to install CI/CD pipelines on top of Kubernetes with **one** command. 
+
 See [here](https://cogitogroup.co.uk/en/tekton-helm-chart) for the Tekton Helm Chart
 
 ## Example 1 - Clone, build and push docker image to ECR using Docker-in-docker
